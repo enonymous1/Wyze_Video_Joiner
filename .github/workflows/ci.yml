@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install package and dev tools
+        run: pip install -e .[gui,dev]
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Mypy (core and CLI; the GUI is Qt-typed separately)
+        run: mypy --strict src/wyze_joiner/core.py src/wyze_joiner/cli.py
+      - name: Tests
+        run: pytest -q
