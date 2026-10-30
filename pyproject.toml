@@ -38,3 +38,16 @@ select = ["E", "F", "I", "W"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+# PyQt6's own stubs are not mypy-parseable (they use `*args, /`, a
+# positional-only marker after var-args, which is invalid syntax), and
+# mypy reaches them through matplotlib -> PIL.ImageQt whenever the gui
+# extra is installed — even when checking audio.py, which never imports
+# Qt itself. Skipping PyQt6 itself does NOT fix this: mypy still parses
+# its stub to build the interface. Skipping the parent, PIL.ImageQt,
+# does: mypy never follows ImageQt's (function-body) Qt imports, so it
+# never opens the unparseable stub. The GUI is already excluded from
+# the mypy gate (see CI); this keeps the gate about our code.
+[[tool.mypy.overrides]]
+module = "PIL.ImageQt"
+follow_imports = "skip"
