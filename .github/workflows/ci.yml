@@ -15,12 +15,12 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install package and dev tools
-        run: pip install -e .[gui,dev]
+        run: pip install -e .[gui,dev,audio]
       - name: Ruff
         run: |
           ruff check .
           ruff format --check .
-      - name: Mypy (core and CLI; the GUI is Qt-typed separately)
-        run: mypy --strict src/wyze_joiner/core.py src/wyze_joiner/cli.py
+      - name: Mypy (core, CLIs, and audio; the GUI is Qt-typed separately)
+        run: mypy --strict src/wyze_joiner/core.py src/wyze_joiner/cli.py src/wyze_joiner/audio.py
       - name: Tests
         run: pytest -q

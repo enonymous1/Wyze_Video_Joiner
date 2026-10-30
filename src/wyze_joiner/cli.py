@@ -14,6 +14,7 @@ from wyze_joiner.core import (
     WyzeJoinerError,
     join_jobs,
     plan_join,
+    plan_record_join,
 )
 
 
@@ -22,7 +23,36 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wyze-join",
         description="Join short Wyze camera clips into longer videos.",
     )
-    parser.add_argument("input", type=Path, help="Folder containing the clips to join")
+    parser.add_argument(
+        "input",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Folder containing the clips to join (omit with --record-dir)",
+    )
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Wyze SD-card record folder (record/<YYYYMMDD>/<HH>/<numeric>.mp4): "
+            "plan one join per hour instead of one join for a single folder"
+        ),
+    )
+    parser.add_argument(
+        "--record-output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Output folder for --record-dir (default: each hour's <HH>.mp4 inside its date folder)"
+        ),
+    )
+    parser.add_argument(
+        "--max-size-gb",
+        type=float,
+        default=None,
+        help="With --record-dir, skip hours larger than this size in GB",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -72,8 +102,61 @@ def _report_plan(jobs: Sequence[JoinJob]) -> None:
             )
 
 
+def _record_progress(fraction: float, message: str) -> None:
+    # Carriage return keeps a TTY on one line; on a pipe it is just text.
+    print(f"\r{message} {fraction:.0f}%", end="", flush=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.record_dir is not None:
+        if args.input is not None:
+            print(
+                "wyze-join: give either an input folder or --record-dir, not both",
+                file=sys.stderr,
+            )
+            return 2
+        if args.output is not None:
+            print(
+                "wyze-join: with --record-dir, use --record-output-dir instead of --output",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            batch = plan_record_join(
+                args.record_dir,
+                output_dir=args.record_output_dir,
+                strategy=args.strategy,
+                force=args.force,
+                max_size_gb=args.max_size_gb,
+            )
+        except (WyzeJoinerError, OutputExistsError) as exc:
+            print(f"wyze-join: {exc}", file=sys.stderr)
+            return 1
+        _report_plan(batch.jobs)
+        for skip in batch.skipped:
+            print(f"Skipped {skip.hour_dir}: {skip.reason}")
+        if args.dry_run:
+            print("Dry run: nothing was written.")
+            return 0
+        if not batch.jobs:
+            print("Nothing to join.")
+            return 0
+        try:
+            outputs = join_jobs(batch.jobs, on_progress=_record_progress)
+        except WyzeJoinerError as exc:
+            print(f"\nwyze-join: {exc}", file=sys.stderr)
+            return 1
+        print()
+        for output in outputs:
+            print(f"Wrote {output}")
+        return 0
+    if args.input is None:
+        print(
+            "wyze-join: an input folder is required (or use --record-dir)",
+            file=sys.stderr,
+        )
+        return 2
     extensions = tuple(ext.strip() for ext in args.extensions.split(",") if ext.strip())
     try:
         jobs = plan_join(

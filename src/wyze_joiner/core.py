@@ -41,11 +41,14 @@ __all__ = [
     "Gap",
     "JoinJob",
     "OutputExistsError",
+    "RecordBatch",
+    "RecordSkip",
     "WyzeJoinerError",
     "clips_compatible",
     "discover_clips",
     "join_jobs",
     "plan_join",
+    "plan_record_join",
     "probe_clip",
 ]
 
@@ -318,6 +321,134 @@ def plan_join(
         return jobs
     job_output = output if output is not None else directory / "joined.mp4"
     return [_plan_group(paths, job_output, strategy, force)]
+
+
+@dataclass(frozen=True)
+class RecordSkip:
+    """One record hour that produced no job, and why."""
+
+    hour_dir: Path
+    output_path: Path
+    reason: str
+
+
+@dataclass
+class RecordBatch:
+    """Planned jobs plus skipped hours from a record folder."""
+
+    jobs: list[JoinJob] = field(default_factory=list)
+    skipped: list[RecordSkip] = field(default_factory=list)
+
+
+_DATE_DIR_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+_HOUR_DIR_RE = re.compile(r"^(\d{2})$")
+
+
+def _record_date(name: str) -> datetime.date | None:
+    match = _DATE_DIR_RE.match(name)
+    if match is None:
+        return None
+    try:
+        return datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def _record_hour(name: str) -> int | None:
+    match = _HOUR_DIR_RE.match(name)
+    if match is None:
+        return None
+    hour = int(match.group(1))
+    return hour if 0 <= hour <= 23 else None
+
+
+def _numeric_clip_paths(hour_dir: Path) -> list[Path]:
+    """Numeric .mp4 clips in an hour folder, in numeric (not string) order.
+
+    The original ss-wyze tool sorted full paths as strings, so ``10.mp4``
+    came before ``2.mp4``. Wyze record clips are minute files, so the
+    stem's number is the order.
+    """
+    clips = [
+        path
+        for path in hour_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".mp4" and path.stem.isdigit()
+    ]
+    clips.sort(key=lambda p: (int(p.stem), p.name.lower()))
+    return clips
+
+
+def plan_record_join(
+    record_dir: Path,
+    *,
+    output_dir: Path | None = None,
+    strategy: str = "auto",
+    force: bool = False,
+    max_size_gb: float | None = None,
+) -> RecordBatch:
+    """Plan one join per hour of a Wyze SD-card ``record`` folder.
+
+    Layout: ``record/<YYYYMMDD>/<HH>/<numeric>.mp4``. Non-date folders,
+    non-hour folders, and non-numeric clips are ignored, matching the
+    original tool. By default each hour's output is ``<HH>.mp4`` inside
+    its date folder, exactly as the original produced; with
+    ``output_dir`` given, outputs go there as ``<YYYY-MM-DD>-<HH>.mp4``
+    so hours from different dates cannot collide.
+
+    Hours are never aborted by one bad hour: an empty hour, an hour
+    over ``max_size_gb``, an hour whose output already exists (without
+    ``force``), and an hour that fails planning are all reported in
+    ``RecordBatch.skipped`` instead of raising.
+    """
+    if strategy not in ("auto", "copy", "reencode"):
+        raise WyzeJoinerError(f"Unknown strategy: {strategy!r} (auto, copy, or reencode)")
+    if not record_dir.is_dir():
+        raise WyzeJoinerError(f"Not a directory: {record_dir}")
+    batch = RecordBatch()
+    dated: list[tuple[datetime.date, Path]] = []
+    for child in record_dir.iterdir():
+        if not child.is_dir():
+            continue
+        date = _record_date(child.name)
+        if date is not None:
+            dated.append((date, child))
+    for date, date_dir in sorted(dated):
+        hours: list[tuple[int, Path]] = []
+        for child in date_dir.iterdir():
+            if not child.is_dir():
+                continue
+            hour = _record_hour(child.name)
+            if hour is not None:
+                hours.append((hour, child))
+        for hour, hour_dir in sorted(hours):
+            if output_dir is not None:
+                output_path = output_dir / f"{date.isoformat()}-{hour:02d}.mp4"
+            else:
+                output_path = date_dir / f"{hour:02d}.mp4"
+            paths = _numeric_clip_paths(hour_dir)
+            if not paths:
+                batch.skipped.append(RecordSkip(hour_dir, output_path, "no numeric .mp4 clips"))
+                continue
+            size_mb = sum(path.stat().st_size for path in paths) / (1024 * 1024)
+            if max_size_gb is not None and size_mb > max_size_gb * 1024:
+                batch.skipped.append(
+                    RecordSkip(
+                        hour_dir,
+                        output_path,
+                        f"size {size_mb:.1f} MB exceeds limit {max_size_gb:g} GB",
+                    )
+                )
+                continue
+            if output_path.exists() and not force:
+                batch.skipped.append(
+                    RecordSkip(hour_dir, output_path, "output already exists (use --force)")
+                )
+                continue
+            try:
+                batch.jobs.append(_plan_group(paths, output_path, strategy, force))
+            except WyzeJoinerError as exc:
+                batch.skipped.append(RecordSkip(hour_dir, output_path, str(exc)))
+    return batch
 
 
 def _plan_group(paths: Sequence[Path], output_path: Path, strategy: str, force: bool) -> JoinJob:

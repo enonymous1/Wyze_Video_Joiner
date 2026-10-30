@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wyze-video-joiner"
-version = "1.0.0"
+version = "1.1.0"
 description = "Join short Wyze camera clips into longer videos"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,11 +14,13 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["PyQt6>=6.5"]
+audio = ["numpy>=1.26", "matplotlib>=3.7"]
 dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10"]
 
 [project.scripts]
 wyze-join = "wyze_joiner.cli:main"
 wyze-join-gui = "wyze_joiner.gui:main"
+wyze-audio = "wyze_joiner.audio:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
