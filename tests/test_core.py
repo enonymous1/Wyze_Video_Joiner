@@ -26,6 +26,17 @@ def test_discover_sorts_and_ignores_non_clips_and_previous_outputs(clips_dir: Pa
     assert [path.name for path in found] == ["a.mp4", "b.mp4"]
 
 
+def test_join_handles_quote_in_filename(clips_dir: Path) -> None:
+    # The concat demuxer quoting must survive a literal apostrophe in a
+    # clip name; this is the regression test for that escaping.
+    make_clip(clips_dir, "it's.mp4", color="red")
+    make_clip(clips_dir, "plain.mp4", color="blue")
+    jobs = plan_join(clips_dir, output=clips_dir / "joined.mp4")
+    assert [clip.path.name for clip in jobs[0].clips] == ["it's.mp4", "plain.mp4"]
+    outputs = join_jobs(jobs)
+    assert 1.8 <= probe_clip(outputs[0]).duration <= 2.2
+
+
 def test_discover_recursive(clips_dir: Path) -> None:
     nested = clips_dir / "2024-01-01"
     nested.mkdir()

@@ -52,6 +52,21 @@ __all__ = [
     "probe_clip",
 ]
 
+# Tunables, named so a reader never has to guess what a bare number means.
+_FFPROBE_TIMEOUT_SECONDS = 60
+_CANCEL_WAIT_SECONDS = 10
+_PROGRESS_POLL_SECONDS = 0.05
+# ffmpeg appends short progress blocks, so the latest out_time_ms is
+# always near the end of the file. Reading only the tail keeps long
+# jobs from turning the 50 ms poll loop into a quadratic re-read.
+_PROGRESS_TAIL_BYTES = 4096
+# Re-encode fallback only; stream-copy jobs never touch the audio.
+_AUDIO_BITRATE = "128k"
+# r_frame_rate is a rational, so two encodings of the same frame rate
+# can differ by a rounding epsilon. This absorbs that, not a real
+# frame-rate difference.
+_FPS_TOLERANCE = 0.01
+
 _DATE_RE = re.compile(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})")
 _TIMESTAMP_RE = re.compile(
     r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_T ]?(\d{2})[-_]?(\d{2})(?:[-_]?(\d{2}))?"
@@ -106,6 +121,8 @@ class JoinJob:
     output_path: Path
     strategy: str  # "copy" or "reencode"
     gaps: list[Gap] = field(default_factory=list)
+    # Re-checked in join_job, not just at plan time: a file that appears
+    # between planning and running must not be silently overwritten.
     force: bool = False
 
     @property
@@ -142,16 +159,21 @@ def discover_clips(
     excluded = {Path(p).resolve() for p in exclude}
     pattern = "**/*" if recursive else "*"
     clips: list[Path] = []
-    for path in directory.glob(pattern):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in wanted:
-            continue
-        if _PREVIOUS_OUTPUT_RE.match(path.name):
-            continue
-        if path.resolve() in excluded:
-            continue
-        clips.append(path)
+    try:
+        for path in directory.glob(pattern):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in wanted:
+                continue
+            if _PREVIOUS_OUTPUT_RE.match(path.name):
+                continue
+            if path.resolve() in excluded:
+                continue
+            clips.append(path)
+    except OSError as exc:
+        # An unreadable folder must surface as a tool error the CLI can
+        # report, not a raw traceback.
+        raise WyzeJoinerError(f"Cannot list clips in {directory}: {exc}") from exc
     clips.sort(key=lambda p: p.relative_to(directory).as_posix().lower())
     return clips
 
@@ -186,7 +208,13 @@ def probe_clip(path: Path) -> ClipInfo:
         str(path),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=_FFPROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
     except subprocess.TimeoutExpired as exc:
         raise WyzeJoinerError(f"ffprobe timed out on {path}") from exc
     if result.returncode != 0:
@@ -222,11 +250,14 @@ def clips_compatible(clips: Sequence[ClipInfo]) -> bool:
     if not clips:
         return False
     first = clips[0]
+    # The fps comparison uses a tolerance, not equality, because
+    # r_frame_rate is a rational (e.g. 30000/1001) and two encodings of
+    # the same frame rate can differ by a rounding epsilon.
     return all(
         clip.video_codec == first.video_codec
         and clip.width == first.width
         and clip.height == first.height
-        and abs(clip.fps - first.fps) < 0.01
+        and abs(clip.fps - first.fps) < _FPS_TOLERANCE
         and clip.audio_codec == first.audio_codec
         and clip.audio_channels == first.audio_channels
         and clip.audio_sample_rate == first.audio_sample_rate
@@ -344,6 +375,14 @@ _DATE_DIR_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 _HOUR_DIR_RE = re.compile(r"^(\d{2})$")
 
 
+def _child_dirs(directory: Path) -> list[Path]:
+    """Subdirectories of ``directory``, or a tool error if it cannot be listed."""
+    try:
+        return [child for child in directory.iterdir() if child.is_dir()]
+    except OSError as exc:
+        raise WyzeJoinerError(f"Cannot list {directory}: {exc}") from exc
+
+
 def _record_date(name: str) -> datetime.date | None:
     match = _DATE_DIR_RE.match(name)
     if match is None:
@@ -406,17 +445,13 @@ def plan_record_join(
         raise WyzeJoinerError(f"Not a directory: {record_dir}")
     batch = RecordBatch()
     dated: list[tuple[datetime.date, Path]] = []
-    for child in record_dir.iterdir():
-        if not child.is_dir():
-            continue
+    for child in _child_dirs(record_dir):
         date = _record_date(child.name)
         if date is not None:
             dated.append((date, child))
     for date, date_dir in sorted(dated):
         hours: list[tuple[int, Path]] = []
-        for child in date_dir.iterdir():
-            if not child.is_dir():
-                continue
+        for child in _child_dirs(date_dir):
             hour = _record_hour(child.name)
             if hour is not None:
                 hours.append((hour, child))
@@ -456,6 +491,8 @@ def _plan_group(paths: Sequence[Path], output_path: Path, strategy: str, force: 
         raise OutputExistsError(
             f"Output already exists: {output_path} (use --force to overwrite it)"
         )
+    # Exclude the output itself by resolved path, so a re-run never
+    # ingests its own previous output as an input clip.
     clips = [probe_clip(path) for path in paths if path.resolve() != output_path.resolve()]
     if not clips:
         raise WyzeJoinerError(f"No clips left after excluding the output: {output_path}")
@@ -474,14 +511,26 @@ def _plan_group(paths: Sequence[Path], output_path: Path, strategy: str, force: 
 def _concat_file_content(clips: Sequence[ClipInfo]) -> str:
     lines = []
     for clip in clips:
+        # The concat demuxer reads single-quoted paths; a literal quote
+        # inside one is written as '\'' (close quote, escaped quote,
+        # reopen quote). Verified with a clip literally named it's.mp4.
         escaped = str(clip.path).replace("'", "'\\''")
         lines.append(f"file '{escaped}'")
     return "\n".join(lines) + "\n"
 
 
 def _parse_progress_file(path: Path, total_duration: float) -> float:
+    """Latest ffmpeg progress fraction, from the tail of the progress file.
+
+    ffmpeg appends short progress blocks, so the newest out_time_ms is
+    always near the end. Reading only the tail keeps a long job from
+    re-reading a growing file on every poll.
+    """
     try:
-        text = path.read_text()
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - _PROGRESS_TAIL_BYTES))
+            text = handle.read().decode("utf-8", errors="ignore")
     except OSError:
         return 0.0
     out_time_ms = 0
@@ -523,12 +572,16 @@ def _run_ffmpeg(
         process = subprocess.Popen(
             full_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
         )
-        assert process.stderr is not None
+        if process.stderr is None:
+            # Popen with stderr=PIPE always sets this; fail loudly here
+            # instead of an AttributeError below. An assert would do the
+            # same job until someone runs with python -O, which strips it.
+            raise WyzeJoinerError("ffmpeg stderr was not captured")
         while process.poll() is None:
             if should_cancel is not None and should_cancel():
                 process.terminate()
                 try:
-                    process.wait(timeout=10)
+                    process.wait(timeout=_CANCEL_WAIT_SECONDS)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
@@ -536,7 +589,7 @@ def _run_ffmpeg(
             if on_progress is not None:
                 fraction = _parse_progress_file(progress_path, total_duration)
                 on_progress(fraction * 100.0, "Joining…")
-            time.sleep(0.05)
+            time.sleep(_PROGRESS_POLL_SECONDS)
         stderr = process.stderr.read()
         if process.returncode != 0:
             raise WyzeJoinerError(f"ffmpeg failed: {stderr.strip() or 'unknown error'}")
@@ -579,7 +632,7 @@ def join_job(
             if first.fps > 0:
                 command += ["-r", f"{first.fps:g}"]
             if first.audio_codec is not None:
-                command += ["-c:a", "aac", "-b:a", "128k"]
+                command += ["-c:a", "aac", "-b:a", _AUDIO_BITRATE]
             else:
                 command += ["-an"]
             command += ["-movflags", "+faststart"]

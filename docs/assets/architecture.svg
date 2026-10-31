@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" font-family="sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#4b5563"/>
+    </marker>
+    <style>
+      .box { fill: #eef2ff; stroke: #4f46e5; stroke-width: 1.5; }
+      .side { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1.5; }
+      .out { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.5; }
+      .label { font-size: 13px; fill: #111827; text-anchor: middle; }
+      .small { font-size: 11px; fill: #4b5563; text-anchor: middle; }
+      .line { stroke: #4b5563; stroke-width: 1.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <!-- Main flow -->
+  <rect class="box" x="20" y="110" width="130" height="60" rx="8"/>
+  <text class="label" x="85" y="136">Discover clips</text>
+  <text class="small" x="85" y="154">sorted, outputs excluded</text>
+  <line class="line" x1="150" y1="140" x2="185" y2="140"/>
+  <rect class="box" x="185" y="110" width="130" height="60" rx="8"/>
+  <text class="label" x="250" y="136">Probe (ffprobe)</text>
+  <text class="small" x="250" y="154">codec, size, fps, audio</text>
+  <line class="line" x1="315" y1="140" x2="350" y2="140"/>
+  <rect class="box" x="350" y="110" width="130" height="60" rx="8"/>
+  <text class="label" x="415" y="136">All clips match?</text>
+  <text class="small" x="415" y="154">same layout as first clip</text>
+  <line class="line" x1="480" y1="125" x2="515" y2="125"/>
+  <rect class="box" x="515" y="95" width="110" height="60" rx="8"/>
+  <text class="label" x="570" y="121">Stream copy</text>
+  <text class="small" x="570" y="139">concat demuxer</text>
+  <line class="line" x1="480" y1="155" x2="515" y2="155"/>
+  <rect class="box" x="515" y="155" width="110" height="60" rx="8"/>
+  <text class="label" x="570" y="181">Re-encode</text>
+  <text class="small" x="570" y="199">to first clip's layout</text>
+  <line class="line" x1="625" y1="125" x2="660" y2="140"/>
+  <line class="line" x1="625" y1="185" x2="660" y2="140"/>
+  <rect class="out" x="660" y="110" width="85" height="60" rx="8"/>
+  <text class="label" x="702" y="145">joined.mp4</text>
+  <!-- Side branches -->
+  <rect class="side" x="185" y="15" width="295" height="50" rx="8"/>
+  <text class="label" x="332" y="36">Record batch mode</text>
+  <text class="small" x="332" y="54">one join job per record/&lt;date&gt;/&lt;hour&gt;</text>
+  <line class="line" x1="332" y1="65" x2="332" y2="110"/>
+  <rect class="side" x="350" y="235" width="295" height="50" rx="8"/>
+  <text class="label" x="497" y="256">Audio analysis (wyze-audio)</text>
+  <text class="small" x="497" y="274">waveform, spectrogram, RMS from joined.mp4</text>
+  <line class="line" x1="702" y1="170" x2="702" y2="235"/>
+</svg>

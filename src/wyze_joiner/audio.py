@@ -31,6 +31,7 @@ import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
@@ -42,6 +43,34 @@ __all__ = [
     "analyze_audio",
     "main",
 ]
+
+
+# Tunables, named so a reader never has to guess what a bare number means.
+_FFPROBE_TIMEOUT_SECONDS = 60
+_EXTRACT_TIMEOUT_SECONDS = 300
+_WAVEFORM_MAX_POINTS = 200_000
+_SPECTROGRAM_NFFT = 2048
+_SPECTROGRAM_OVERLAP = 1024
+_RMS_FRAME_SAMPLES = 2048
+
+
+def _plotting() -> tuple[ModuleType, ModuleType]:
+    """Import numpy + pyplot lazily, or raise the audio-extra error once.
+
+    Every plot helper needs both libraries, and importing them at module
+    top would make this module unimportable without the audio extra —
+    the whole point of the extra is that the joiner itself stays
+    dependency-free. One helper keeps the four identical try/except
+    blocks (and their error text) from drifting apart.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError as exc:
+        raise AudioAnalysisError(
+            "Audio analysis needs the audio extra: pip install wyze-video-joiner[audio]"
+        ) from exc
+    return np, plt
 
 
 class AudioAnalysisError(Exception):
@@ -82,7 +111,9 @@ def _has_audio(path: Path) -> bool:
         str(path),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=_FFPROBE_TIMEOUT_SECONDS, check=False
+        )
     except subprocess.TimeoutExpired as exc:
         raise AudioAnalysisError(f"ffprobe timed out on {path}") from exc
     if result.returncode != 0:
@@ -109,7 +140,9 @@ def _extract_audio(source: Path, dest: Path, *, mono: bool) -> None:
     if mono:
         command += ["-ac", "1"]
     command += ["-c:a", "pcm_s16le", str(dest)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=_EXTRACT_TIMEOUT_SECONDS, check=False
+    )
     if result.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
         raise AudioAnalysisError(
             f"ffmpeg failed to extract audio from {source}: {result.stderr.strip()}"
@@ -139,6 +172,9 @@ def _read_wav_mono(path: Path) -> tuple[np.ndarray, int]:
     elif sampwidth == 2:
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
     elif sampwidth == 3:
+        # 24-bit PCM is three little-endian bytes per sample with no
+        # native numpy dtype, so assemble the int by hand and sign-extend:
+        # values at or above 2**23 are negative in two's complement.
         triplets = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
         values = (
             triplets[:, 0].astype(np.int32)
@@ -159,16 +195,10 @@ def _read_wav_mono(path: Path) -> tuple[np.ndarray, int]:
 def _plot_waveform(
     samples: np.ndarray, sample_rate: int, output_path: Path, *, close: bool = True
 ) -> None:
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-    except ImportError as exc:
-        raise AudioAnalysisError(
-            "Audio analysis needs the audio extra: pip install wyze-video-joiner[audio]"
-        ) from exc
-    # Plotting every sample of a long file is slow and unreadable; 200k
-    # points still shows the shape faithfully.
-    stride = max(1, len(samples) // 200_000)
+    np, plt = _plotting()
+    # Plotting every sample of a long file is slow and unreadable; the
+    # capped point count still shows the shape faithfully.
+    stride = max(1, len(samples) // _WAVEFORM_MAX_POINTS)
     plotted = samples[::stride]
     times = np.arange(len(plotted)) * stride / sample_rate
     fig, ax = plt.subplots(figsize=(14, 5))
@@ -184,14 +214,11 @@ def _plot_waveform(
 def _plot_spectrogram(
     samples: np.ndarray, sample_rate: int, output_path: Path, *, close: bool = True
 ) -> None:
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:
-        raise AudioAnalysisError(
-            "Audio analysis needs the audio extra: pip install wyze-video-joiner[audio]"
-        ) from exc
+    _, plt = _plotting()
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.specgram(samples, NFFT=2048, Fs=sample_rate, noverlap=1024, scale="dB")
+    ax.specgram(
+        samples, NFFT=_SPECTROGRAM_NFFT, Fs=sample_rate, noverlap=_SPECTROGRAM_OVERLAP, scale="dB"
+    )
     ax.set_title("Spectrogram")
     ax.set_xlabel("Time (s)")
     fig.tight_layout()
@@ -203,14 +230,10 @@ def _plot_spectrogram(
 def _plot_rms(
     samples: np.ndarray, sample_rate: int, output_path: Path, *, close: bool = True
 ) -> None:
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-    except ImportError as exc:
-        raise AudioAnalysisError(
-            "Audio analysis needs the audio extra: pip install wyze-video-joiner[audio]"
-        ) from exc
-    frame = 2048
+    np, plt = _plotting()
+    # Non-overlapping frames keep memory linear in the file length: an
+    # overlapping window view would materialize frames x frame floats.
+    frame = _RMS_FRAME_SAMPLES
     count = len(samples) // frame
     if count == 0:
         raise AudioAnalysisError("Audio is too short to compute RMS energy")
@@ -284,13 +307,11 @@ def analyze_audio(
                 spectrogram_path = spectrogram_target
                 rms_path = rms_target
             if show_plots:
-                try:
-                    import matplotlib.pyplot as plt
-                except ImportError as exc:
-                    raise AudioAnalysisError(
-                        "Audio analysis needs the audio extra: pip install wyze-video-joiner[audio]"
-                    ) from exc
+                _, plt = _plotting()
                 plt.show()
+                # Under a headless backend show() is a no-op, so the
+                # figures kept open for display still need closing.
+                plt.close("all")
     return AudioAnalysis(
         source=file_path,
         audio_path=audio_path,

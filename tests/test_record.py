@@ -92,3 +92,13 @@ def test_record_cli_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert main(["--record-dir", str(record), "--dry-run"]) == 0
     assert not (record / "20240101" / "07.mp4").exists()
     assert main(["--record-dir", str(record), str(tmp_path)]) == 2
+
+
+def test_record_cli_rejects_single_folder_flags(tmp_path: Path) -> None:
+    # Single-folder flags must fail loudly in record mode, not be
+    # silently ignored: --recursive is already implied, --split-by-day
+    # conflicts with per-hour outputs, and record mode is MP4-only.
+    record = _record(tmp_path)
+    assert main(["--record-dir", str(record), "--recursive"]) == 2
+    assert main(["--record-dir", str(record), "--split-by-day"]) == 2
+    assert main(["--record-dir", str(record), "--extensions", ".mov"]) == 2

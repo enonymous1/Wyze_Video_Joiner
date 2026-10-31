@@ -91,6 +91,8 @@ class JoinWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    """The single window: folder picker, clip list, options, join/cancel."""
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Wyze Video Joiner")
@@ -114,6 +116,9 @@ class MainWindow(QMainWindow):
         browse_output.clicked.connect(self._browse_output)
 
         self.recursive_check = QCheckBox("Include subfolders")
+        # The list shows what discovery would find, so toggling the
+        # option must refresh it — otherwise it shows the old set.
+        self.recursive_check.toggled.connect(lambda _checked: self._refresh_list())
         self.split_check = QCheckBox("One file per day")
         self.force_check = QCheckBox("Overwrite existing output")
         self.strategy_combo = QComboBox()
@@ -227,7 +232,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(int(fraction))
         self.status_label.setText(f"{message} {fraction:.0f}%")
 
-    def _on_finished(self, outputs: list) -> None:
+    def _on_finished(self, outputs: list[str]) -> None:
         self.join_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setValue(100)
